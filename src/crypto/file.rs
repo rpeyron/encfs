@@ -4,15 +4,25 @@ use crate::crypto::file_iv::FileIv;
 #[cfg(test)]
 use crate::crypto::ssl::SslCipher;
 use std::io;
-use std::os::unix::fs::FileExt;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt as PlatformFileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt as PlatformFileExt;
 
 pub trait ReadAt {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
 }
 
-impl<T: FileExt> ReadAt for T {
+impl<T: PlatformFileExt> ReadAt for T {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        FileExt::read_at(self, buf, offset)
+        #[cfg(unix)]
+        {
+            PlatformFileExt::read_at(self, buf, offset)
+        }
+        #[cfg(windows)]
+        {
+            PlatformFileExt::seek_read(self, buf, offset)
+        }
     }
 }
 
@@ -20,9 +30,16 @@ pub trait WriteAt {
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize>;
 }
 
-impl<T: FileExt> WriteAt for T {
+impl<T: PlatformFileExt> WriteAt for T {
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
-        FileExt::write_at(self, buf, offset)
+        #[cfg(unix)]
+        {
+            PlatformFileExt::write_at(self, buf, offset)
+        }
+        #[cfg(windows)]
+        {
+            PlatformFileExt::seek_write(self, buf, offset)
+        }
     }
 }
 

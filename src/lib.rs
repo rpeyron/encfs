@@ -3,8 +3,11 @@ pub mod config_binary;
 pub mod config_proto;
 pub mod constants;
 pub mod crypto;
+#[cfg(feature = "fuse")]
 pub mod fs;
+#[cfg(feature = "fuse")]
 pub mod reverse_fs;
+#[cfg(feature = "fuse")]
 pub mod security;
 pub mod xattr_name;
 

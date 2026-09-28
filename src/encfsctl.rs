@@ -9,7 +9,6 @@ use encfs::{
 use getrandom::fill as fill_random;
 use rpassword::prompt_password;
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -1142,7 +1141,7 @@ fn cmd_cat(args: &[String], extpass: Option<String>, ignore_mac: bool) -> Result
         std::fs::File::open(&file_path).context(t!("ctl.error_failed_to_open_encrypted_file"))?;
 
     // Read header to get file IV
-    use std::os::unix::fs::FileExt;
+    use encfs::crypto::file::ReadAt;
 
     let header_size = config.header_size();
     let file_iv = if header_size > 0 {
@@ -1189,6 +1188,7 @@ fn cmd_cat(args: &[String], extpass: Option<String>, ignore_mac: bool) -> Result
     Ok(())
 }
 
+#[cfg(unix)]
 fn cmd_ls(rootdir: &Path, path: &str, extpass: Option<String>) -> Result<()> {
     use chrono::{DateTime, Local};
     use encfs::crypto::file::FileDecoder;
@@ -1280,6 +1280,11 @@ fn cmd_ls(rootdir: &Path, path: &str, extpass: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn cmd_ls(_rootdir: &Path, _path: &str, _extpass: Option<String>) -> Result<()> {
+    Err(anyhow::anyhow!("encfsctl ls is only supported on Unix"))
 }
 
 fn cmd_autopasswd(rootdir: &Path) -> Result<()> {
@@ -1694,6 +1699,7 @@ fn cmd_speed() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn cmd_export(
     rootdir: &Path,
     destdir: &Path,
@@ -1725,6 +1731,17 @@ fn cmd_export(
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn cmd_export(
+    _rootdir: &Path,
+    _destdir: &Path,
+    _extpass: Option<String>,
+    _fail_on_error: bool,
+) -> Result<()> {
+    Err(anyhow::anyhow!("encfsctl export is only supported on Unix"))
+}
+
+#[cfg(unix)]
 fn export_directory(
     current_encrypted_dir: &Path,
     current_dest_dir: &Path,
@@ -1733,8 +1750,9 @@ fn export_directory(
     dir_iv: u64,
     fail_on_error: bool,
 ) -> Result<()> {
-    use encfs::crypto::file::FileDecoder;
-    use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
+    use encfs::crypto::file::{FileDecoder, ReadAt};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let entries = std::fs::read_dir(current_encrypted_dir)
         .context(t!("ctl.error_failed_to_read_directory"))?;
@@ -1959,6 +1977,17 @@ fn export_directory(
     Ok(())
 }
 
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: &[u8]) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+}
+
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: &[u8]) -> std::ffi::OsString {
+    std::ffi::OsString::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
 fn decode_path_string(cipher: &dyn Cipher, encoded_path: &str, chained_iv: bool) -> Result<String> {
     // Decode an encrypted path by decoding each component with IV chaining across path components.
     // Note: IV chaining is per-path-component, not across unrelated sibling names.
@@ -1974,7 +2003,7 @@ fn decode_path_string(cipher: &dyn Cipher, encoded_path: &str, chained_iv: bool)
                     .to_str()
                     .ok_or_else(|| anyhow::anyhow!("{}", t!("ctl.error_invalid_utf8")))?;
                 let (decrypted_name_bytes, new_iv) = cipher.decrypt_filename(name_str, iv)?;
-                out.push(std::ffi::OsStr::from_bytes(&decrypted_name_bytes));
+                out.push(os_string_from_bytes(&decrypted_name_bytes));
                 if chained_iv {
                     iv = new_iv;
                 }
@@ -2005,7 +2034,10 @@ fn encode_path_string(
             std::path::Component::RootDir => {}
             std::path::Component::CurDir => {}
             std::path::Component::Normal(name) => {
-                let name_bytes = name.as_bytes();
+                let name_bytes = name
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("{}", t!("ctl.error_invalid_utf8")))?
+                    .as_bytes();
                 let (encrypted_name, new_iv) = cipher.encrypt_filename(name_bytes, iv)?;
                 out.push(encrypted_name);
                 if chained_iv {
@@ -2038,7 +2070,10 @@ fn encrypt_path_with_iv(
             std::path::Component::RootDir => {}
             std::path::Component::CurDir => {}
             std::path::Component::Normal(name) => {
-                let name_bytes = name.as_bytes();
+                let name_bytes = name
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("{}", t!("ctl.error_invalid_utf8")))?
+                    .as_bytes();
                 let (encrypted_name, new_iv) = cipher.encrypt_filename(name_bytes, iv)?;
                 encrypted_path.push(encrypted_name);
                 if config.chained_name_iv {
@@ -2492,7 +2527,7 @@ fn decrypt_path_with_iv(
                     .to_str()
                     .ok_or_else(|| anyhow::anyhow!("{}", t!("ctl.error_invalid_utf8")))?;
                 let (decrypted_name_bytes, new_iv) = cipher.decrypt_filename(name_str, iv)?;
-                decrypted_path.push(std::ffi::OsStr::from_bytes(&decrypted_name_bytes));
+                decrypted_path.push(os_string_from_bytes(&decrypted_name_bytes));
                 if config.chained_name_iv {
                     iv = new_iv;
                 }
@@ -2512,11 +2547,15 @@ fn decrypt_path_with_iv(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use encfs::config::{ConfigType, EncfsConfig, Interface, KdfAlgorithm};
+    #[cfg(unix)]
     use encfs::crypto::ssl::SslCipher;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
+    #[cfg(unix)]
     #[test]
     fn test_export_symlink_repro() -> Result<()> {
         let temp_dir =
@@ -2620,6 +2659,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_export_bad_symlink_repro() -> Result<()> {
         use std::ffi::OsStr;
@@ -2703,6 +2743,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_v4_export_header_issue() -> Result<()> {
         use std::io::Write;
@@ -2818,6 +2859,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_showcruft_broken_symlink() -> Result<()> {
         use std::os::unix::fs::symlink;
@@ -2904,6 +2946,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_export_symlink_decryption_fail() -> Result<()> {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -2985,6 +3028,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_export_fail_on_error() -> Result<()> {
         let temp_dir =
